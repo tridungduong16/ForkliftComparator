@@ -361,6 +361,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // PUT route for updating forklift models (for drag and drop)
+  app.put("/api/forklift-models/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const updates = req.body;
+      const success = await storage.updateForkliftModel(id, updates);
+      
+      if (success) {
+        res.json({ message: "Model updated successfully" });
+      } else {
+        res.status(404).json({ message: "Model not found" });
+      }
+    } catch (error) {
+      res.status(500).json({ message: "Failed to update model" });
+    }
+  });
+
   // Update model sort order (for drag-and-drop reordering)
   app.patch("/api/forklift-models/reorder", async (req, res) => {
     try {

@@ -102,8 +102,8 @@ export function BrandGrid({ models, selectedModels, onModelToggle }: BrandGridPr
     return draggedItems[tierKey] || modelsByBrand[brand]?.filter(model => model.tier === tier) || [];
   };
 
-  // Drag and drop handlers - only for visual reordering
-  const handleDragEnd = (result: any) => {
+  // Enhanced drag and drop handlers - allow cross-tier and cross-brand movement
+  const handleDragEnd = async (result: any) => {
     if (!result.destination) return;
 
     const { source, destination, draggableId } = result;
@@ -113,39 +113,65 @@ export function BrandGrid({ models, selectedModels, onModelToggle }: BrandGridPr
       return;
     }
 
-    // Only allow reordering within the same tier
-    if (source.droppableId !== destination.droppableId) {
-      toast({
-        title: "Reordering Only",
-        description: "Drag to reorder items within the same tier. Use Edit button to change tier.",
-        variant: "default"
-      });
-      return;
+    // Parse source and destination
+    const [sourceBrand, sourceTier] = source.droppableId.split('-');
+    const [destBrand, destTier] = destination.droppableId.split('-');
+    
+    // Find the model being moved
+    const modelId = parseInt(draggableId);
+    const modelToMove = models.find(m => m.id === modelId);
+    
+    if (!modelToMove) return;
+
+    // Check if we're moving between different tiers or brands
+    const isCrossTierMove = sourceTier !== destTier;
+    const isCrossBrandMove = sourceBrand !== destBrand;
+
+    if (isCrossTierMove || isCrossBrandMove) {
+      // Update the model's tier and/or brand in the database
+      try {
+        const updates: any = {};
+        if (isCrossTierMove) updates.tier = destTier;
+        if (isCrossBrandMove) updates.brand = destBrand;
+
+        await updateModelMutation.mutateAsync({ modelId, updates });
+        
+        toast({
+          title: "Model Updated",
+          description: `${modelToMove.model} moved to ${destBrand} ${destTier} tier`,
+        });
+      } catch (error) {
+        toast({
+          title: "Update Failed",
+          description: "Failed to update model. Please try again.",
+          variant: "destructive"
+        });
+        return;
+      }
+    } else {
+      // Same tier reordering - update visual order only
+      const tierKey = source.droppableId;
+      const currentItems = draggedItems[tierKey] || modelsByBrand[sourceBrand]?.filter(model => model.tier === sourceTier) || [];
+      const newItems = Array.from(currentItems);
+      const [reorderedItem] = newItems.splice(source.index, 1);
+      newItems.splice(destination.index, 0, reorderedItem);
+
+      setDraggedItems(prev => ({
+        ...prev,
+        [tierKey]: newItems
+      }));
     }
-
-    // Update visual order without changing data
-    const tierKey = source.droppableId;
-    const [brand, tier] = tierKey.split('-');
-    const currentItems = draggedItems[tierKey] || modelsByBrand[brand]?.filter(model => model.tier === tier) || [];
-    const newItems = Array.from(currentItems);
-    const [reorderedItem] = newItems.splice(source.index, 1);
-    newItems.splice(destination.index, 0, reorderedItem);
-
-    setDraggedItems(prev => ({
-      ...prev,
-      [tierKey]: newItems
-    }));
   };
 
-  // Mutation to update model tier
-  const updateModelTierMutation = useMutation({
-    mutationFn: async ({ modelId, newTier }: { modelId: number; newTier: string }) => {
+  // Enhanced mutation to update model tier and/or brand
+  const updateModelMutation = useMutation({
+    mutationFn: async ({ modelId, updates }: { modelId: number; updates: { tier?: string; brand?: string } }) => {
       const response = await fetch(`/api/forklift-models/${modelId}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ tier: newTier }),
+        body: JSON.stringify(updates),
       });
       
       if (!response.ok) {
@@ -540,14 +566,9 @@ export function BrandGrid({ models, selectedModels, onModelToggle }: BrandGridPr
                     </div>
                   </div>
 
-                  {/* Tier-based organization with drag-and-drop - only show tiers that have models */}
+                  {/* Tier-based organization with drag-and-drop - show all tiers as drop zones */}
                   {TIER_HIERARCHY.map(tier => {
                     const tierModels = getDisplayModels(brand, tier);
-                    
-                    // Only render tier section if it has models
-                    if (tierModels.length === 0) {
-                      return null;
-                    }
                     
                     return (
                       <div key={tier} className="mb-4">
@@ -563,10 +584,25 @@ export function BrandGrid({ models, selectedModels, onModelToggle }: BrandGridPr
                             <div
                               {...provided.droppableProps}
                               ref={provided.innerRef}
-                              className={`space-y-2 min-h-[50px] p-2 border-2 border-dashed border-gray-200 rounded-lg ${
-                                snapshot.isDraggingOver ? 'border-blue-400 bg-blue-50' : ''
+                              className={`space-y-2 min-h-[50px] p-2 border-2 border-dashed rounded-lg transition-all duration-200 ${
+                                snapshot.isDraggingOver 
+                                  ? 'border-blue-500 bg-blue-50 shadow-inner' 
+                                  : 'border-gray-300 hover:border-gray-400'
                               }`}
+                              style={{
+                                backgroundColor: snapshot.isDraggingOver ? '#EBF8FF' : 'transparent'
+                              }}
                             >
+                              {tierModels.length === 0 && !snapshot.isDraggingOver && (
+                                <div className="text-center py-3 text-gray-400 text-sm">
+                                  Drop models here
+                                </div>
+                              )}
+                              {snapshot.isDraggingOver && tierModels.length === 0 && (
+                                <div className="text-center py-3 text-blue-500 text-sm font-medium">
+                                  Drop to move to {getTierLabel(tier)}
+                                </div>
+                              )}
                               {tierModels.map((model, index) => {
                                 const isSelected = selectedModels.some(m => m.id === model.id);
                                 return (
