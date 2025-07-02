@@ -1,0 +1,67 @@
+ENTRY LEVEL (ENT) — For basic operations, price-sensitive buyers
+Brand	Model/Tier	Fuel Type	Engine (Tier)	Tier engine 	Transmission	Brakes	Notes
+Bobcat	NXP Series	LPG/Diesel	Yanmar / HMC (Tier III)	III	Powershift (1-sp)	Drum	Entry model, basic functionality
+Hyster	UT Series	LPG/Diesel	XXXX / Yanmar (Tier III)	I	Powershift (1-sp)	Drum	Rebadged Maximal, low spec
+Yale	UX Series	LPG/Diesel	GCT / Yammer / Kubota (Tier III)	I	Powershift (1-sp)	Drum	Basic build, budget-focused
+TCM	FD/FG Series	LPG/Diesel	Nissan/Kubota (Tier III)	II	Powershift (1-sp)	Drum	Mostly sold as used units
+Mitsubishi	Grendia FD/FG	LPG/Diesel	S4S 4-cyl (Tier III)	III	Powershift (1-sp)	Drum 	Simple design, entry spec
+Caterpillar	GP/DP25N	LPG/Diesel	S4S 4 Cylinder  / Hyundai 3.3L (Tier III)	III	Powershift (1-sp)	Drum 	Entry spec, ~$29K AUD
+Crown	CGx/CDx Series	LPG/Diesel	Hyundai 2.4L / Yanmar 3.3L (Tier III)	III	Powershift (1-sp)	Drum 	Same build base as Bobcat NXP entry level
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+MID TIER (MID) — For regular industrial users, balanced price/spec
+Brand	Model/Tier	Fuel Type	Engine (Tier)	Transmission	Brakes	Notes
+Toyota	7-Series	LPG/Diesel	1FS / 14Z-II (Tier III)	Torque-converter	Oil-immersed disc	Mid to premium depending config
+Hyster	A Series	LPG/Diesel	Yanmar / Kubota (Tier III)	Techtronix / PS	Wet disc	Customizable mid-tier
+Yale	VX Series (Base)	LPG/Diesel	Yanmar / Kubota (Tier III)	Techtronix / PS	Wet disc	Mid-level with upgrade options
+Crown	Pro 5 Series	LPG/Diesel	Yanmar / HMC (Tier III)	Powershift (1-sp)	Wet disc	Built by Bobcat, equivalent to 7-Series
+Bobcat	7-Series	LPG/Diesel	Kobota / CGT PSI (Tier III)	Powershift (1-sp)	Oil-cooled disc	Fully featured, ergonomic, durable
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+PREMIUM (TOP) — For high-demand operations, full features
+Brand	Model/Tier	Fuel Type	Engine (Tier)	Transmission	Brakes	Notes
+						
+Linde	H20–H35 / HT B	LPG/Diesel	Kubota 2.4L (Tier III)	Hydrostatic	Oil-immersed disc	Hydrostatic drive, high end build
+Hyster	Fortens Series	LPG/Diesel	Yanmar / Kubota (Tier III)	Techtronix (1–2 sp)	Wet disc	Advanced model, high load ops
+Yale	VX Series (Prod)	LPG/Diesel	Yanmar / Kubota (Tier III)	Techtronix (2-sp)	Wet disc	Top-end variant, operator tech
+Toyota	8-Series	LPG/Diesel	1FS / 14Z-II (Tier III)	Torque-converter	Oil-immersed disc	Larger capacity, high-end forklift
+Bobcat	NXS 9-Series	Diesel	Kubota (Tier IV)	Powershift (1-sp)	Oil-cooled disc	9-Series, heavy duty, premium diesel model (Korea)
+
