@@ -2,15 +2,23 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import fs from 'fs';
 
-// the newest OpenAI model is "gpt-4o" which was released May 13, 2024. do not change this unless explicitly requested by the user
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Initialize OpenAI client only if API key is available
+let openai: OpenAI | null = null;
+if (process.env.OPENAI_API_KEY) {
+  // the newest OpenAI model is "gpt-4o" which was released May 13, 2024. do not change this unless explicitly requested by the user
+  openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  });
+}
 
-// the newest Anthropic model is "claude-sonnet-4-20250514" which was released May 14, 2025. Use this by default unless user has already selected claude-3-7-sonnet-20250219
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+// Initialize Anthropic client only if API key is available
+let anthropic: Anthropic | null = null;
+if (process.env.ANTHROPIC_API_KEY) {
+  // the newest Anthropic model is "claude-sonnet-4-20250514" which was released May 14, 2025. Use this by default unless user has already selected claude-3-7-sonnet-20250219
+  anthropic = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+  });
+}
 
 export interface ExtractedSpecifications {
   brand: string;
@@ -143,6 +151,10 @@ export class BrochureScanner {
   }
 
   async scanBrochureWithOpenAI(text: string, brand: string, model: string): Promise<ExtractedSpecifications> {
+    if (!openai) {
+      throw new Error('OpenAI API key not configured. Please set OPENAI_API_KEY environment variable.');
+    }
+
     const isAutoDetect = brand === "Auto-detect" || model === "Auto-detect";
     
     const prompt = `
@@ -253,6 +265,10 @@ Respond with JSON in this exact format:
   }
 
   async scanBrochureWithAnthropic(text: string, brand: string, model: string): Promise<ExtractedSpecifications> {
+    if (!anthropic) {
+      throw new Error('Anthropic API key not configured. Please set ANTHROPIC_API_KEY environment variable.');
+    }
+
     const prompt = `
 You are a forklift specification extraction expert. Extract detailed specifications from this brochure text for ${brand} ${model}.
 
@@ -329,6 +345,11 @@ Respond with JSON only in this exact format:
 
   async scanBrochure(filePath: string, brand: string, model: string, preferredProvider: 'openai' | 'anthropic' = 'openai'): Promise<ExtractedSpecifications> {
     try {
+      // Check if any AI provider is available
+      if (!openai && !anthropic) {
+        throw new Error('No AI providers configured. Please set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.');
+      }
+
       // Extract text from PDF
       const text = await this.extractTextFromPDF(filePath);
       
@@ -336,20 +357,33 @@ Respond with JSON only in this exact format:
         throw new Error('PDF contains insufficient text for analysis');
       }
 
-      // Try primary provider first
-      if (preferredProvider === 'openai') {
+      // Try primary provider first, with fallback to available provider
+      if (preferredProvider === 'openai' && openai) {
         try {
           return await this.scanBrochureWithOpenAI(text, brand, model);
         } catch (error) {
           console.log('OpenAI failed, trying Anthropic:', error);
-          return await this.scanBrochureWithAnthropic(text, brand, model);
+          if (anthropic) {
+            return await this.scanBrochureWithAnthropic(text, brand, model);
+          }
+          throw error;
         }
-      } else {
+      } else if (preferredProvider === 'anthropic' && anthropic) {
         try {
           return await this.scanBrochureWithAnthropic(text, brand, model);
         } catch (error) {
           console.log('Anthropic failed, trying OpenAI:', error);
+          if (openai) {
+            return await this.scanBrochureWithOpenAI(text, brand, model);
+          }
+          throw error;
+        }
+      } else {
+        // Use whatever provider is available
+        if (openai) {
           return await this.scanBrochureWithOpenAI(text, brand, model);
+        } else if (anthropic) {
+          return await this.scanBrochureWithAnthropic(text, brand, model);
         }
       }
     } catch (error) {
