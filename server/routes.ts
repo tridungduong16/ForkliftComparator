@@ -1,885 +1,340 @@
-import type { Express } from "express";
-import { createServer, type Server } from "http";
-import { storage } from "./storage";
-import multer from "multer";
-import path from "path";
-import fs from "fs";
-import express from "express";
-import { brochureScanner } from "./ai-brochure-scanner";
-import { dataMigration } from "./data-migration";
-import { brochureRestoration } from "./brochure-restoration";
-import { insertForkliftModelSchema, insertBrochureSchema, insertCompetitorQuoteSchema } from "@shared/schema";
-// import pdfParse from 'pdf-parse';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { serveStatic } from 'hono/bun';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import multer from 'multer';
+import { db } from './db';
+import { forkliftModels, brochures, quotes } from '../shared/schema';
+import { eq, like, and, or, sql, desc } from 'drizzle-orm';
 import OpenAI from 'openai';
+import { extractTextFromPDF } from './ai-brochure-scanner';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const app = new Hono();
 
-// AI Quote Data Extraction Function
-async function extractQuoteData(filePath: string, expectedBrand?: string): Promise<any> {
-  try {
-    const pdfParse = require('pdf-parse');
-    const pdfBuffer = fs.readFileSync(filePath);
-    const pdfData = await pdfParse(pdfBuffer);
-    const text = pdfData.text;
-
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        {
-          role: "system",
-          content: `You are a quote document analyzer. Extract structured data from forklift competitor quotes. Return JSON format with keys: competitorBrand, competitorModel, quotedPrice, quoteDate, powerType, capacity, warranty, supplierName, notes. If information is not found, use null. Focus on forklift equipment quotes.`
-        },
-        {
-          role: "user",
-          content: `Extract quote information from this document:\n\n${text}`
-        }
-      ],
-      response_format: { type: "json_object" },
-      max_tokens: 1000
-    });
-
-    const extracted = JSON.parse(response.choices[0].message.content || '{}');
-    
-    // Clean and format the extracted data
-    return {
-      competitorBrand: extracted.competitorBrand || expectedBrand || null,
-      competitorModel: extracted.competitorModel || null,
-      quotedPrice: extracted.quotedPrice || null,
-      quoteDate: extracted.quoteDate || null,
-      powerType: extracted.powerType || null,
-      capacity: extracted.capacity || null,
-      warranty: extracted.warranty || null,
-      supplierName: extracted.supplierName || null,
-      notes: extracted.notes || `AI extracted from ${path.basename(filePath)}`
-    };
-  } catch (error) {
-    console.error('Quote extraction error:', error);
-    return {};
+// Initialize OpenAI client with error handling
+let openai: OpenAI | null = null;
+try {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || apiKey === 'your_openai_api_key_here') {
+    console.warn('⚠️  OpenAI API key not configured. AI features will be disabled.');
+    console.warn('   Please set OPENAI_API_KEY in your .env file to enable AI functionality.');
+  } else {
+    openai = new OpenAI({ apiKey });
+    console.log('✅ OpenAI client initialized successfully');
   }
+} catch (error) {
+  console.error('❌ Failed to initialize OpenAI client:', error);
+  console.warn('   AI features will be disabled.');
 }
+
+app.use('*', cors({
+  origin: ['http://localhost:5173', 'http://localhost:3000'],
+  credentials: true,
+}));
+
+// Serve static files
+app.use('/uploads/*', serveStatic({ root: './' }));
 
 // Configure multer for file uploads
-const brochureDir = path.join(process.cwd(), 'uploads/brochures');
-const quotesDir = path.join(process.cwd(), 'uploads/quotes');
-
-if (!fs.existsSync(brochureDir)) {
-  fs.mkdirSync(brochureDir, { recursive: true });
-}
-if (!fs.existsSync(quotesDir)) {
-  fs.mkdirSync(quotesDir, { recursive: true });
-}
-
-const storage_multer = multer.diskStorage({
+const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    // Use different directories based on field name
-    if (file.fieldname === 'quote') {
-      cb(null, quotesDir);
-    } else {
-      cb(null, brochureDir);
+    const uploadDir = file.fieldname === 'quote' ? 'uploads/quotes' : 'uploads/brochures';
+    if (!existsSync(uploadDir)) {
+      mkdirSync(uploadDir, { recursive: true });
     }
+    cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    const timestamp = Date.now();
+    const random = Math.floor(Math.random() * 1000000000);
+    cb(null, `${file.fieldname}-${timestamp}-${random}.pdf`);
   }
 });
 
-const upload = multer({ 
-  storage: storage_multer,
-  fileFilter: (req, file, cb) => {
-    // Allow PDFs for brochures and PDFs/images for quotes
-    if (file.fieldname === 'quote') {
-      if (file.mimetype === 'application/pdf' || 
-          file.mimetype.startsWith('image/')) {
-        cb(null, true);
-      } else {
-        cb(new Error('Only PDF and image files are allowed for quotes'));
-      }
-    } else {
-      if (file.mimetype === 'application/pdf') {
-        cb(null, true);
-      } else {
-        cb(new Error('Only PDF files are allowed for brochures'));
-      }
-    }
-  },
-  limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit
+const upload = multer({ storage });
+
+// API Routes
+app.get('/api/models', async (c) => {
+  try {
+    const models = await db.select().from(forkliftModels);
+    return c.json(models);
+  } catch (error) {
+    console.error('Error fetching models:', error);
+    return c.json({ error: 'Failed to fetch models' }, 500);
   }
 });
 
-export async function registerRoutes(app: Express): Promise<Server> {
-  // Serve uploaded files statically
-  app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+app.get('/api/models/search', async (c) => {
+  try {
+    const query = c.req.query('q') || '';
+    const brand = c.req.query('brand');
+    const fuelType = c.req.query('fuelType');
+    const minCapacity = c.req.query('minCapacity');
+    const maxCapacity = c.req.query('maxCapacity');
 
-  // Test AI brochure scanning
-  app.post("/api/test-ai-scan", async (req, res) => {
-    try {
-      console.log("Testing AI brochure scanning...");
-      
-      // Import the scanner dynamically
-      const { brochureScanner } = await import('./ai-brochure-scanner.js');
-      
-      // Test with Toyota brochure
-      const pdfPath = path.join(process.cwd(), 'uploads/brochures/brochure-1750071940153-841576755.pdf');
-      
-      const specs = await brochureScanner.scanBrochure(pdfPath, 'Toyota', '8FG FD Series', 'anthropic');
-      
-      res.json({
-        success: true,
-        message: "AI extraction successful",
-        specifications: specs
-      });
-    } catch (error) {
-      console.error("AI scanning error:", error.message);
-      res.status(500).json({
-        success: false,
-        error: error.message
-      });
-    }
-  });
+    let whereConditions = [];
 
-  // Get all forklift models
-  app.get("/api/forklift-models", async (req, res) => {
-    try {
-      const models = await storage.getAllForkliftModels();
-      res.json(models);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch forklift models" });
-    }
-  });
-
-  // Create new forklift model
-  app.post("/api/forklift-models", async (req, res) => {
-    try {
-      const modelData = req.body;
-      
-      // Check for duplicates
-      const existingModels = await storage.getAllForkliftModels();
-      const duplicate = existingModels.find(m => 
-        m.brand.toLowerCase() === modelData.brand.toLowerCase() && 
-        m.model.toLowerCase().trim() === modelData.model.toLowerCase().trim()
+    if (query) {
+      whereConditions.push(
+        or(
+          like(forkliftModels.model, `%${query}%`),
+          like(forkliftModels.brand, `%${query}%`),
+          like(forkliftModels.series, `%${query}%`)
+        )
       );
-      
-      if (duplicate) {
-        return res.status(400).json({ 
-          message: "Duplicate series not allowed",
-          error: `${modelData.brand} ${modelData.model} already exists`
-        });
-      }
-      
-      const result = await storage.updateOrCreateModel(modelData);
-      res.json({ 
-        success: true, 
-        message: "Model created successfully",
-        result 
-      });
-    } catch (error) {
-      console.error("Error creating model:", error);
-      res.status(500).json({ 
-        message: "Failed to create model",
-        error: error instanceof Error ? error.message : "Unknown error"
-      });
     }
-  });
 
-  // Get forklift models by brand
-  app.get("/api/forklift-models/brand/:brand", async (req, res) => {
-    try {
-      const { brand } = req.params;
-      const models = await storage.getForkliftModelsByBrand(brand);
-      res.json(models);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch models by brand" });
+    if (brand) {
+      whereConditions.push(eq(forkliftModels.brand, brand));
     }
-  });
 
-  // Get multiple forklift models by IDs for comparison
-  app.post("/api/forklift-models/compare", async (req, res) => {
-    try {
-      const { ids } = req.body;
-      if (!Array.isArray(ids)) {
-        return res.status(400).json({ message: "IDs must be an array" });
-      }
-      const models = await storage.getForkliftModelsByIds(ids);
-      res.json(models);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch models for comparison" });
+    if (fuelType) {
+      whereConditions.push(eq(forkliftModels.fuelType, fuelType));
     }
-  });
 
-  // Search forklift models
-  app.get("/api/forklift-models/search", async (req, res) => {
-    try {
-      const { q } = req.query;
-      if (!q || typeof q !== 'string') {
-        return res.status(400).json({ message: "Search query is required" });
-      }
-      const models = await storage.searchForkliftModels(q);
-      res.json(models);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to search forklift models" });
+    if (minCapacity) {
+      whereConditions.push(sql`${forkliftModels.capacity} >= ${parseFloat(minCapacity)}`);
     }
-  });
 
-  // Filter forklift models
-  app.get("/api/forklift-models/filter", async (req, res) => {
-    try {
-      const { capacityRange, powerType } = req.query;
-      const models = await storage.filterForkliftModels(
-        capacityRange as string,
-        powerType as string
-      );
-      res.json(models);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to filter forklift models" });
+    if (maxCapacity) {
+      whereConditions.push(sql`${forkliftModels.capacity} <= ${parseFloat(maxCapacity)}`);
     }
-  });
 
+    const models = await db.select().from(forkliftModels)
+      .where(whereConditions.length > 0 ? and(...whereConditions) : undefined)
+      .limit(100);
 
+    return c.json(models);
+  } catch (error) {
+    console.error('Error searching models:', error);
+    return c.json({ error: 'Failed to search models' }, 500);
+  }
+});
 
-  app.get("/api/brochures", async (req, res) => {
-    try {
-      const brochures = await storage.getAllBrochures();
-      res.json(brochures);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch brochures" });
-    }
-  });
-
-  app.get("/api/brochures/brand/:brand", async (req, res) => {
-    try {
-      const { brand } = req.params;
-      const brochures = await storage.getBrochuresByBrand(brand);
-      res.json(brochures);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch brochures by brand" });
-    }
-  });
-
-  app.get("/api/brochures/:brand/:model", async (req, res) => {
-    try {
-      const { brand, model } = req.params;
-      const brochures = await storage.getBrochuresByModel(brand, model);
-      res.json(brochures);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch brochures by model" });
-    }
-  });
-
-  // Standard brochure upload endpoint
-  app.post("/api/brochures", upload.single('brochure'), async (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({ error: "No file uploaded" });
-      }
-
-      const { brand, model } = req.body;
-      if (!brand || !model) {
-        return res.status(400).json({ error: "Brand and model are required" });
-      }
-
-      // Store brochure info
-      const brochure = await storage.uploadBrochure({
-        brand: brand,
-        model: model,
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        fileSize: req.file.size,
-        uploadedAt: new Date().toISOString(),
-        fileUrl: `/uploads/brochures/${req.file.filename}`
-      });
-
-      res.json({ 
-        success: true, 
-        brochure,
-        message: "Brochure uploaded successfully"
-      });
-    } catch (error) {
-      console.error("Brochure upload error:", error);
-      res.status(500).json({ error: "Failed to upload brochure" });
-    }
-  });
-
-  // Serve brochure files for download
-  app.get("/uploads/brochures/:filename", (req, res) => {
-    const filename = req.params.filename;
-    const filepath = path.join(process.cwd(), 'uploads', 'brochures', filename);
+app.get('/api/brands', async (c) => {
+  try {
+    const brands = await db.select({ brand: forkliftModels.brand })
+      .from(forkliftModels)
+      .groupBy(forkliftModels.brand)
+      .orderBy(forkliftModels.brand);
     
-    // Check if file exists
-    if (fs.existsSync(filepath)) {
-      res.download(filepath);
-    } else {
-      res.status(404).json({ error: "File not found" });
+    return c.json(brands.map(b => b.brand));
+  } catch (error) {
+    console.error('Error fetching brands:', error);
+    return c.json({ error: 'Failed to fetch brands' }, 500);
+  }
+});
+
+app.get('/api/fuel-types', async (c) => {
+  try {
+    const fuelTypes = await db.select({ fuelType: forkliftModels.fuelType })
+      .from(forkliftModels)
+      .groupBy(forkliftModels.fuelType)
+      .orderBy(forkliftModels.fuelType);
+    
+    return c.json(fuelTypes.map(f => f.fuelType));
+  } catch (error) {
+    console.error('Error fetching fuel types:', error);
+    return c.json({ error: 'Failed to fetch fuel types' }, 500);
+  }
+});
+
+app.get('/api/series', async (c) => {
+  try {
+    const brand = c.req.query('brand');
+    let query = db.select({ 
+      series: forkliftModels.series,
+      brand: forkliftModels.brand 
+    }).from(forkliftModels);
+
+    if (brand) {
+      query = query.where(eq(forkliftModels.brand, brand));
     }
-  });
 
-  app.delete("/api/brochures/:id", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const success = await storage.deleteBrochure(id);
-      if (success) {
-        res.json({ message: "Brochure deleted successfully" });
-      } else {
-        res.status(404).json({ message: "Brochure not found" });
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete brochure" });
+    const series = await query
+      .groupBy(forkliftModels.series, forkliftModels.brand)
+      .orderBy(forkliftModels.brand, forkliftModels.series);
+    
+    return c.json(series);
+  } catch (error) {
+    console.error('Error fetching series:', error);
+    return c.json({ error: 'Failed to fetch series' }, 500);
+  }
+});
+
+app.get('/api/stats', async (c) => {
+  try {
+    const totalModels = await db.select({ count: sql`count(*)` }).from(forkliftModels);
+    const totalBrands = await db.select({ count: sql`count(distinct brand)` }).from(forkliftModels);
+    const totalBrochures = await db.select({ count: sql`count(*)` }).from(brochures);
+    const totalQuotes = await db.select({ count: sql`count(*)` }).from(quotes);
+
+    return c.json({
+      totalModels: totalModels[0].count,
+      totalBrands: totalBrands[0].count,
+      totalBrochures: totalBrochures[0].count,
+      totalQuotes: totalQuotes[0].count
+    });
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    return c.json({ error: 'Failed to fetch stats' }, 500);
+  }
+});
+
+// Brochure management routes
+app.get('/api/brochures', async (c) => {
+  try {
+    const allBrochures = await db.select().from(brochures).orderBy(desc(brochures.uploadedAt));
+    return c.json(allBrochures);
+  } catch (error) {
+    console.error('Error fetching brochures:', error);
+    return c.json({ error: 'Failed to fetch brochures' }, 500);
+  }
+});
+
+app.post('/api/brochures/upload', upload.single('brochure'), async (c) => {
+  try {
+    const file = c.req.file;
+    if (!file) {
+      return c.json({ error: 'No file uploaded' }, 400);
     }
-  });
 
-  app.delete("/api/forklift-models/:id", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const success = await storage.deleteForkliftModel(id);
-      
-      if (success) {
-        res.json({ message: "Model deleted successfully" });
-      } else {
-        res.status(404).json({ message: "Model not found" });
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete model" });
+    const brochure = await db.insert(brochures).values({
+      filename: file.filename,
+      originalName: file.originalname,
+      filePath: file.path,
+      fileSize: file.size,
+      uploadedAt: new Date()
+    }).returning();
+
+    return c.json(brochure[0]);
+  } catch (error) {
+    console.error('Error uploading brochure:', error);
+    return c.json({ error: 'Failed to upload brochure' }, 500);
+  }
+});
+
+app.post('/api/brochures/:id/scan', async (c) => {
+  try {
+    if (!openai) {
+      return c.json({ error: 'AI functionality is not available. Please configure OPENAI_API_KEY.' }, 503);
     }
-  });
 
-  app.patch("/api/forklift-models/:id", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const updates = req.body;
-      const success = await storage.updateForkliftModel(id, updates);
-      
-      if (success) {
-        res.json({ message: "Model updated successfully" });
-      } else {
-        res.status(404).json({ message: "Model not found" });
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update model" });
+    const brochureId = parseInt(c.req.param('id'));
+    const brochure = await db.select().from(brochures).where(eq(brochures.id, brochureId)).limit(1);
+    
+    if (!brochure.length) {
+      return c.json({ error: 'Brochure not found' }, 404);
     }
-  });
 
-  // PUT route for updating forklift models (for drag and drop)
-  app.put("/api/forklift-models/:id", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const updates = req.body;
-      const success = await storage.updateForkliftModel(id, updates);
-      
-      if (success) {
-        res.json({ message: "Model updated successfully" });
-      } else {
-        res.status(404).json({ message: "Model not found" });
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update model" });
+    const extractedData = await extractTextFromPDF(brochure[0].filePath, openai);
+    
+    // Update brochure with extracted data
+    await db.update(brochures)
+      .set({ 
+        extractedData: JSON.stringify(extractedData),
+        processedAt: new Date()
+      })
+      .where(eq(brochures.id, brochureId));
+
+    return c.json({ success: true, data: extractedData });
+  } catch (error) {
+    console.error('Error scanning brochure:', error);
+    return c.json({ error: 'Failed to scan brochure' }, 500);
+  }
+});
+
+app.delete('/api/brochures/:id', async (c) => {
+  try {
+    const brochureId = parseInt(c.req.param('id'));
+    await db.delete(brochures).where(eq(brochures.id, brochureId));
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting brochure:', error);
+    return c.json({ error: 'Failed to delete brochure' }, 500);
+  }
+});
+
+// Quote management routes
+app.get('/api/quotes', async (c) => {
+  try {
+    const allQuotes = await db.select().from(quotes).orderBy(desc(quotes.uploadedAt));
+    return c.json(allQuotes);
+  } catch (error) {
+    console.error('Error fetching quotes:', error);
+    return c.json({ error: 'Failed to fetch quotes' }, 500);
+  }
+});
+
+app.post('/api/quotes/upload', upload.single('quote'), async (c) => {
+  try {
+    const file = c.req.file;
+    if (!file) {
+      return c.json({ error: 'No file uploaded' }, 400);
     }
-  });
 
-  // Update model sort order (for drag-and-drop reordering)
-  app.patch("/api/forklift-models/reorder", async (req, res) => {
-    try {
-      const { brand, orderUpdates } = req.body;
-      
-      // Update each model's sort order without changing tier data
-      for (const update of orderUpdates) {
-        await storage.updateForkliftModel(update.id, { sortOrder: update.sortOrder });
-      }
-      
-      res.json({ success: true });
-    } catch (error) {
-      console.error("Error updating model order:", error);
-      res.status(500).json({ error: "Failed to update model order" });
+    const quote = await db.insert(quotes).values({
+      filename: file.filename,
+      originalName: file.originalname,
+      filePath: file.path,
+      fileSize: file.size,
+      uploadedAt: new Date()
+    }).returning();
+
+    return c.json(quote[0]);
+  } catch (error) {
+    console.error('Error uploading quote:', error);
+    return c.json({ error: 'Failed to upload quote' }, 500);
+  }
+});
+
+app.delete('/api/quotes/:id', async (c) => {
+  try {
+    const quoteId = parseInt(c.req.param('id'));
+    await db.delete(quotes).where(eq(quotes.id, quoteId));
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting quote:', error);
+    return c.json({ error: 'Failed to delete quote' }, 500);
+  }
+});
+
+// Bulk data import
+app.post('/api/models/bulk-import', async (c) => {
+  try {
+    const data = await c.req.json();
+    
+    if (!Array.isArray(data)) {
+      return c.json({ error: 'Data must be an array' }, 400);
     }
-  });
 
-  // Fix Linde series - remove duplicates and keep only 4 correct series
-  app.post("/api/fix-linde-series", async (req, res) => {
-    try {
-      // Get all models and find Linde ones to delete
-      const allModels = await storage.getAllForkliftModels();
-      const lindeModels = allModels.filter(m => m.brand === "Linde");
-      
-      // Delete all existing Linde models
-      for (const model of lindeModels) {
-        await storage.deleteForkliftModel(model.id);
-      }
-      
-      // Add the correct 4 Linde series
-      const correctLindeSeries = [
-        {
-          brand: "Linde",
-          model: "Baoli Series",
-          tier: "ENTRY",
-          loadCapacity: 2500,
-          liftHeight: 180,
-          powerType: "LPG/Diesel",
-          operatingWeight: 3500,
-          turnRadius: 78,
-          travelSpeed: "10.5",
-          priceRangeMin: 28000,
-          priceRangeMax: 34000,
-          warranty: 12,
-          availability: "In Stock",
-          overallScore: "7.2",
-          capacityRange: "2000-3500 kg",
-          brochureUrl: null
-        },
-        {
-          brand: "Linde",
-          model: "HT Series",
-          tier: "MID",
-          loadCapacity: 2750,
-          liftHeight: 185,
-          powerType: "LPG/Diesel",
-          operatingWeight: 3700,
-          turnRadius: 80,
-          travelSpeed: "11.0",
-          priceRangeMin: 36000,
-          priceRangeMax: 42000,
-          warranty: 18,
-          availability: "2-3 weeks",
-          overallScore: "8.0",
-          capacityRange: "2000-3500 kg",
-          brochureUrl: null
-        },
-        {
-          brand: "Linde",
-          model: "H Series",
-          tier: "PREMIUM",
-          loadCapacity: 3000,
-          liftHeight: 190,
-          powerType: "LPG/Diesel",
-          operatingWeight: 3850,
-          turnRadius: 82,
-          travelSpeed: "12.0",
-          priceRangeMin: 48000,
-          priceRangeMax: 54000,
-          warranty: 24,
-          availability: "4-5 weeks",
-          overallScore: "8.6",
-          capacityRange: "2000-3500 kg",
-          brochureUrl: null
-        },
-        {
-          brand: "Linde",
-          model: "P Series",
-          tier: "SUPERHEAVY",
-          loadCapacity: 3500,
-          liftHeight: 195,
-          powerType: "LPG/Diesel",
-          operatingWeight: 4100,
-          turnRadius: 86,
-          travelSpeed: "12.5",
-          priceRangeMin: 60000,
-          priceRangeMax: 70000,
-          warranty: 36,
-          availability: "6-8 weeks",
-          overallScore: "9.0",
-          capacityRange: "2000-3500 kg",
-          brochureUrl: null
-        }
-      ];
-      
-      // Create the correct models
-      for (const modelData of correctLindeSeries) {
-        await storage.updateOrCreateModel(modelData);
-      }
-      
-      res.json({ success: true, message: "Linde series fixed - now shows only 4 correct series" });
-    } catch (error) {
-      console.error("Error fixing Linde series:", error);
-      res.status(500).json({ error: "Failed to fix Linde series" });
-    }
-  });
-
-  app.put("/api/forklift-models/:id/brochure", async (req, res) => {
-    try {
-      const modelId = parseInt(req.params.id);
-      const { brochureUrl } = req.body;
-      
-      const success = await storage.updateModelBrochureUrl(modelId, brochureUrl);
-      if (success) {
-        res.json({ message: "Model brochure URL updated successfully" });
-      } else {
-        res.status(404).json({ message: "Model not found" });
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update model brochure URL" });
-    }
-  });
-
-  // Import specification data
-  app.post("/api/specifications/import", async (req, res) => {
-    try {
-      const { specifications } = req.body;
-      if (!specifications || !Array.isArray(specifications)) {
-        return res.status(400).json({ message: "Valid specifications array is required" });
-      }
-
-      const success = await storage.importSpecificationData(specifications);
-      if (success) {
-        res.json({ 
-          message: "Specifications imported successfully", 
-          count: specifications.length 
-        });
-      } else {
-        res.status(500).json({ message: "Failed to import specifications" });
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to import specifications" });
-    }
-  });
-
-  app.put("/api/forklift-models/:id/specifications", async (req, res) => {
-    try {
-      const modelId = parseInt(req.params.id);
-      const specifications = req.body;
-      
-      const success = await storage.updateModelSpecifications(modelId, specifications);
-      if (success) {
-        res.json({ message: "Model specifications updated successfully" });
-      } else {
-        res.status(404).json({ message: "Model not found" });
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update model specifications" });
-    }
-  });
-
-  // Smart brochure upload endpoint with AI extraction
-  app.post("/api/brochures/smart-upload", upload.single('brochure'), async (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({ error: "No file uploaded" });
-      }
-
-      // Process brochure with AI to extract brand and model
+    const results = [];
+    for (const item of data) {
       try {
-        const specs = await brochureScanner.scanBrochure(
-          req.file.path,
-          "Auto-detect", // Let AI determine brand
-          "Auto-detect"  // Let AI determine model
-        );
-
-        // Store brochure info with AI-extracted data
-        const brochure = await storage.uploadBrochure({
-          brand: specs.brand,
-          model: specs.model,
-          filename: req.file.filename,
-          originalName: req.file.originalname,
-          fileSize: req.file.size,
-          uploadedAt: new Date().toISOString(),
-          fileUrl: `/uploads/brochures/${req.file.filename}`
-        });
-
-        // Update model specifications in database
-        await storage.updateModelSpecificationsFromBrochure(specs.brand, specs.model, specs);
-
-        res.json({ 
-          success: true, 
-          brand: specs.brand,
-          model: specs.model,
-          brochure,
-          specifications: specs,
-          message: `AI extracted and processed: ${specs.brand} ${specs.model}`
-        });
-      } catch (aiError: any) {
-        console.error("AI processing failed:", aiError);
-        res.status(500).json({ error: `AI processing failed: ${aiError.message}` });
-      }
-    } catch (error) {
-      console.error("Smart upload error:", error);
-      res.status(500).json({ error: "Failed to process brochure" });
-    }
-  });
-
-  // Data migration endpoint for series-based management
-  app.get("/api/data/migration-status", async (req, res) => {
-    try {
-      const report = await dataMigration.runMigrationReport();
-      res.json(report);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to generate migration report" });
-    }
-  });
-
-  app.post("/api/data/migrate", async (req, res) => {
-    try {
-      const report = await dataMigration.runMigrationReport();
-      res.json({ 
-        success: true, 
-        message: "Migration completed successfully",
-        report 
-      });
-    } catch (error) {
-      res.status(500).json({ message: "Migration failed" });
-    }
-  });
-
-  app.post("/api/data/restore-brochures", async (req, res) => {
-    try {
-      const result = await brochureRestoration.restoreAllBrochures();
-      res.json({ 
-        success: true, 
-        message: "Brochure restoration completed",
-        result 
-      });
-    } catch (error) {
-      res.status(500).json({ message: "Brochure restoration failed" });
-    }
-  });
-
-  // Competitor quote management endpoints
-  app.post("/api/competitor-quotes", upload.single('quote'), async (req, res) => {
-    try {
-      // Handle both file upload and JSON data
-      let quoteData;
-      
-      if (req.file) {
-        // File upload with form data - use quotes directory
-        const fileUrl = `/uploads/quotes/${req.file.filename}`;
+        const model = await db.insert(forkliftModels).values({
+          brand: item.brand,
+          model: item.model,
+          series: item.series || '',
+          capacity: parseFloat(item.capacity) || 0,
+          fuelType: item.fuelType || 'Electric',
+          liftHeight: parseFloat(item.liftHeight) || 0,
+          price: parseFloat(item.price) || 0,
+          year: parseInt(item.year) || new Date().getFullYear(),
+          specifications: item.specifications || {}
+        }).returning();
         
-        // Try to extract information from the quote document using AI
-        let extractedData = {};
-        try {
-          if (req.file.mimetype === 'application/pdf') {
-            extractedData = await extractQuoteData(req.file.path, req.body.competitorBrand);
-          }
-        } catch (error) {
-          console.warn("Quote AI extraction failed, using manual data:", error);
-        }
-        
-        quoteData = {
-          brand: req.body.brand,
-          model: req.body.model,
-          competitorBrand: req.body.competitorBrand || extractedData.competitorBrand,
-          competitorModel: req.body.competitorModel || extractedData.competitorModel,
-          quotedPrice: req.body.quotedPrice || extractedData.quotedPrice,
-          quoteDate: req.body.quoteDate || extractedData.quoteDate,
-          powerType: req.body.powerType || extractedData.powerType,
-          notes: req.body.notes || extractedData.notes,
-          status: req.body.status || 'active',
-          uploadedAt: new Date().toISOString(),
-          filename: req.file.filename,
-          fileUrl: fileUrl,
-          // Additional extracted fields
-          ...extractedData
-        };
-      } else {
-        // JSON data without file
-        quoteData = {
-          ...req.body,
-          uploadedAt: new Date().toISOString()
-        };
+        results.push({ success: true, model: model[0] });
+      } catch (error) {
+        results.push({ success: false, error: error.message, item });
       }
-      
-      const validatedData = insertCompetitorQuoteSchema.parse(quoteData);
-      const quote = await storage.addCompetitorQuote(validatedData);
-      res.json(quote);
-    } catch (error) {
-      console.error("Competitor quote upload error:", error);
-      res.status(400).json({ message: "Invalid quote data" });
     }
-  });
 
-  app.get("/api/competitor-quotes", async (req, res) => {
-    try {
-      const { brand, model } = req.query;
-      
-      if (brand && model) {
-        const quotes = await storage.getCompetitorQuotesByModel(
-          brand as string, 
-          model as string
-        );
-        res.json(quotes);
-      } else {
-        const quotes = await storage.getAllCompetitorQuotes();
-        res.json(quotes);
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch competitor quotes" });
-    }
-  });
+    return c.json({ results });
+  } catch (error) {
+    console.error('Error in bulk import:', error);
+    return c.json({ error: 'Failed to import data' }, 500);
+  }
+});
 
-  app.put("/api/competitor-quotes/:id", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const updateData = req.body;
-      const success = await storage.updateCompetitorQuote(id, updateData);
-      
-      if (success) {
-        res.json({ success: true });
-      } else {
-        res.status(404).json({ message: "Quote not found" });
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to update quote" });
-    }
-  });
-
-  app.delete("/api/competitor-quotes/:id", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const success = await storage.deleteCompetitorQuote(id);
-      
-      if (success) {
-        res.json({ success: true });
-      } else {
-        res.status(404).json({ message: "Quote not found" });
-      }
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete quote" });
-    }
-  });
-
-  // Brand management endpoint
-  app.post("/api/brands", async (req, res) => {
-    try {
-      const { name, country, description } = req.body;
-      
-      if (!name) {
-        return res.status(400).json({ message: "Brand name is required" });
-      }
-
-      // Create a placeholder model for the new brand to establish it in the system
-      const newBrandModel = {
-        brand: name,
-        model: `${name} Series`,
-        tier: 'ENTRY',
-        loadCapacity: 2500,
-        liftHeight: 3000,
-        powerType: 'LPG/Diesel',
-        operatingWeight: 4000,
-        turnRadius: 2200,
-        travelSpeed: '20 km/h',
-        priceRangeMin: 45000,
-        priceRangeMax: 55000,
-        warranty: 12,
-        overallScore: 'B+',
-        capacityRange: '2000-3500 kg',
-        brochureUrl: null
-      };
-
-      const result = await storage.updateOrCreateModel(newBrandModel);
-      
-      res.json({ 
-        success: true,
-        brand: name,
-        model: newBrandModel.model,
-        message: `Brand ${name} added successfully`
-      });
-    } catch (error) {
-      console.error("Add brand error:", error);
-      res.status(500).json({ message: "Failed to add brand" });
-    }
-  });
-
-  // Bulk model update endpoint
-  app.post("/api/forklift-models/bulk-update", async (req, res) => {
-    try {
-      const { models } = req.body;
-      if (!Array.isArray(models)) {
-        return res.status(400).json({ message: "Models array is required" });
-      }
-
-      let updated = 0;
-      let created = 0;
-
-      for (const modelData of models) {
-        const success = await storage.updateOrCreateModel(modelData);
-        if (success.created) {
-          created++;
-        } else if (success.updated) {
-          updated++;
-        }
-      }
-
-      res.json({ 
-        success: true, 
-        updated, 
-        created,
-        total: models.length,
-        message: `Processed ${models.length} models: ${updated} updated, ${created} created`
-      });
-    } catch (error) {
-      console.error("Bulk update error:", error);
-      res.status(500).json({ message: "Failed to bulk update models" });
-    }
-  });
-
-  // Series navigation routes
-  app.get("/api/series/:brand", async (req, res) => {
-    try {
-      const { brand } = req.params;
-      const models = await storage.getForkliftModelsByBrand(brand);
-      res.json(models);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch series by brand" });
-    }
-  });
-
-  app.get("/api/series/:brand/:series", async (req, res) => {
-    try {
-      const { brand, series } = req.params;
-      const decodedSeries = decodeURIComponent(series.replace(/-/g, ' '));
-      
-      const allModels = await storage.getForkliftModelsByBrand(brand);
-      const seriesModels = allModels.filter(model => {
-        const normalizedModelName = model.model.toLowerCase().replace(/[-\s]+/g, ' ').trim();
-        const normalizedSeriesName = decodedSeries.toLowerCase().replace(/[-\s]+/g, ' ').trim();
-        
-        return normalizedModelName.includes(normalizedSeriesName) ||
-               normalizedSeriesName.includes(normalizedModelName) ||
-               (model.series && model.series.toLowerCase().includes(normalizedSeriesName));
-      });
-      
-      res.json(seriesModels);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch series models" });
-    }
-  });
-
-  // AI Insights endpoint
-  app.post('/api/generate-insights', async (req, res) => {
-    try {
-      const { models }: { models: any[] } = req.body;
-
-      if (!models || models.length === 0) {
-        return res.status(400).json({ error: 'No models provided for comparison' });
-      }
-
-      // Generate insights for each model
-      const insights = [];
-
-      for (const model of models) {
-        const insight = {
-          model: model.model,
-          brand: model.brand,
-          strengths: `${model.tier} tier positioning with ${model.loadCapacity}kg capacity and ${model.powerType} power options. Strong reliability with ${model.warranty}-month warranty.`,
-          weaknesses: model.tier === 'ENTRY' ? 'Limited advanced features compared to premium models' : 
-                     model.tier === 'PREMIUM' ? 'Higher price point may limit market reach' :
-                     'Mid-range positioning requires clear differentiation',
-          competitiveAdvantage: `Proven performance in ${model.capacityRange} capacity range with excellent ${model.availability} availability`,
-          talkTrack: `Emphasize ${model.warranty}-month warranty, proven reliability, and strong resale value. Highlight ${model.powerType} flexibility and ${model.overallScore} performance rating.`,
-          pricePosition: `Competitive pricing at $${model.priceRangeMin?.toLocaleString()}-$${model.priceRangeMax?.toLocaleString()} delivers strong value in ${model.tier.toLowerCase()} segment`
-        };
-        insights.push(insight);
-      }
-
-      res.json({ insights, totalModels: models.length });
-
-    } catch (error) {
-      console.error('Error generating insights:', error);
-      res.status(500).json({ 
-        error: 'Failed to generate insights',
-        details: error instanceof Error ? error.message : 'Unknown error'
-      });
-    }
-  });
-
-  const httpServer = createServer(app);
-  return httpServer;
-}
+export default app;
