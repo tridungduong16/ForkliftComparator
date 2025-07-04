@@ -20,6 +20,12 @@ export const forkliftModels = pgTable("forklift_models", {
   overallScore: decimal("overall_score", { precision: 2, scale: 1 }).notNull(),
   capacityRange: text("capacity_range").notNull(), // "3,000-5,000 lbs", etc.
   brochureUrl: text("brochure_url"), // URL to uploaded brochure PDF
+  series: text("series"),
+  capacity: decimal("capacity", { precision: 10, scale: 2 }),
+  fuelType: text("fuel_type"),
+  price: integer("price"),
+  year: integer("year"),
+  specifications: text("specifications"),
 });
 
 export const brochures = pgTable("brochures", {
@@ -33,6 +39,28 @@ export const brochures = pgTable("brochures", {
   fileUrl: text("file_url").notNull(),
   powerType: text("power_type"),
   status: text("status").default("uploaded"),
+  filePath: text("file_path"),
+  extractedData: text("extracted_data"),
+  processedAt: text("processed_at"),
+});
+
+export const quotes = pgTable("quotes", {
+  id: serial("id").primaryKey(),
+  filename: text("filename").notNull(),
+  originalName: text("original_name").notNull(),
+  filePath: text("file_path").notNull(),
+  fileSize: integer("file_size").notNull(),
+  uploadedAt: text("uploaded_at").notNull(),
+  brand: text("brand"),
+  model: text("model"),
+  competitorBrand: text("competitor_brand"),
+  competitorModel: text("competitor_model"),
+  quotedPrice: text("quoted_price"),
+  quoteDate: text("quote_date"),
+  notes: text("notes"),
+  status: text("status").default("active"),
+  extractedData: text("extracted_data"),
+  processedAt: text("processed_at"),
 });
 
 export const competitorQuotes = pgTable("competitor_quotes", {
@@ -62,39 +90,6 @@ export const competitorQuotes = pgTable("competitor_quotes", {
   status: text("status").default("active").notNull(), // active, expired, won, lost
 });
 
-export const insertForkliftModelSchema = createInsertSchema(forkliftModels).omit({
-  id: true,
-});
-
-export const insertBrochureSchema = createInsertSchema(brochures).omit({
-  id: true,
-});
-
-export const insertCompetitorQuoteSchema = createInsertSchema(competitorQuotes).omit({
-  id: true,
-});
-
-export type InsertForkliftModel = z.infer<typeof insertForkliftModelSchema>;
-export type ForkliftModel = typeof forkliftModels.$inferSelect;
-export type InsertBrochure = z.infer<typeof insertBrochureSchema>;
-export type Brochure = typeof brochures.$inferSelect;
-export type InsertCompetitorQuote = z.infer<typeof insertCompetitorQuoteSchema>;
-export type CompetitorQuote = typeof competitorQuotes.$inferSelect;
-
-export const users = pgTable("users", {
-  id: serial("id").primaryKey(),
-  username: text("username").notNull().unique(),
-  password: text("password").notNull(),
-});
-
-export const insertUserSchema = createInsertSchema(users).pick({
-  username: true,
-  password: true,
-});
-
-export type InsertUser = z.infer<typeof insertUserSchema>;
-export type User = typeof users.$inferSelect;
-
 export const distributorDetails = pgTable("distributor_details", {
   id: serial("id").primaryKey(),
   brand: text("brand").notNull(),
@@ -118,9 +113,41 @@ export const distributorDetails = pgTable("distributor_details", {
   notes: text("notes"),
 });
 
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  username: text("username").notNull().unique(),
+  password: text("password").notNull(),
+});
+
+// Type exports
+export const insertForkliftModelSchema = createInsertSchema(forkliftModels).omit({
+  id: true,
+});
+
+export const insertBrochureSchema = createInsertSchema(brochures).omit({
+  id: true,
+});
+
+export const insertCompetitorQuoteSchema = createInsertSchema(competitorQuotes).omit({
+  id: true,
+});
+
 export const insertDistributorDetailsSchema = createInsertSchema(distributorDetails).omit({
   id: true,
 });
 
+export const insertUserSchema = createInsertSchema(users).pick({
+  username: true,
+  password: true,
+});
+
+export type InsertForkliftModel = z.infer<typeof insertForkliftModelSchema>;
+export type ForkliftModel = typeof forkliftModels.$inferSelect;
+export type InsertBrochure = z.infer<typeof insertBrochureSchema>;
+export type Brochure = typeof brochures.$inferSelect;
+export type InsertCompetitorQuote = z.infer<typeof insertCompetitorQuoteSchema>;
+export type CompetitorQuote = typeof competitorQuotes.$inferSelect;
 export type InsertDistributorDetails = z.infer<typeof insertDistributorDetailsSchema>;
 export type DistributorDetails = typeof distributorDetails.$inferSelect;
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type User = typeof users.$inferSelect;
